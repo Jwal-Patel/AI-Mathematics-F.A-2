@@ -1,623 +1,251 @@
-"""
-Last-Mile Delivery Analytics Dashboard
-FA-2: LogiSight Analytics Pvt. Ltd.
-Author: Jwal Patel
-"""
-
+# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+import altair as alt
+from typing import Tuple, Dict, List
 
-# Page configuration
-st.set_page_config(
-    page_title="Last-Mile Delivery Analytics",
-    page_icon="🚚",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="Last-Mile Delivery Analytics", layout="wide")
 
-# Custom CSS for better styling
-st.markdown("""
-    <style>
-    .main {
-        padding: 0rem 1rem;
-    }
-    .stMetric {
-        background-color: #f0f2f6;
-        padding: 15px;
-        border-radius: 10px;
-    }
-    h1 {
-        color: #1f77b4;
-        padding-bottom: 20px;
-    }
-    h2 {
-        color: #2c3e50;
-        padding-top: 20px;
-        padding-bottom: 10px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-# ==================== DATA LOADING & CLEANING ====================
+# ---------- Utilities ----------
+EXPECTED_COLS = ["Delivery_Time","Traffic","Weather","Vehicle","Agent_Age","Agent_Rating","Area","Category"]
 
 @st.cache_data(show_spinner=False)
-def load_and_clean_data(file_path):
-    """
-    Load and clean the delivery dataset with comprehensive preprocessing.
-    Handles missing values, standardizes categories, and derives new metrics.
-    """
-    try:
-        # Load data
-        df = pd.read_excel(file_path, engine='openpyxl')
-        
-        # Display raw data info for debugging
-        original_shape = df.shape
-        
-        # Standardize column names (handle spaces, case variations)
-        df.columns = df.columns.str.strip().str.replace(' ', '_')
-        
-        # Expected columns with possible variations
-        column_mapping = {
-            'delivery_time': ['Delivery_Time', 'delivery_time', 'Time', 'DeliveryTime'],
-            'traffic': ['Traffic', 'traffic', 'Traffic_Condition'],
-            'weather': ['Weather', 'weather', 'Weather_Condition'],
-            'vehicle': ['Vehicle', 'vehicle', 'Vehicle_Type'],
-            'agent_age': ['Agent_Age', 'agent_age', 'Age'],
-            'agent_rating': ['Agent_Rating', 'agent_rating', 'Rating'],
-            'area': ['Area', 'area', 'Location', 'Region'],
-            'category': ['Category', 'category', 'Product_Category']
-        }
-        
-        # Flexible column detection
-        for standard_name, variations in column_mapping.items():
-            for col in df.columns:
-                if col in variations:
-                    df.rename(columns={col: standard_name}, inplace=True)
-                    break
-        
-        # Ensure required columns exist
-        required_cols = ['delivery_time', 'traffic', 'weather', 'vehicle', 
-                        'agent_age', 'agent_rating', 'area', 'category']
-        
-        missing_cols = [col for col in required_cols if col not in df.columns]
-        if missing_cols:
-            st.error(f"Missing required columns: {missing_cols}")
-            st.error(f"Available columns: {df.columns.tolist()}")
-            st.stop()
-        
-        # Data type conversions
-        df['delivery_time'] = pd.to_numeric(df['delivery_time'], errors='coerce')
-        df['agent_age'] = pd.to_numeric(df['agent_age'], errors='coerce')
-        df['agent_rating'] = pd.to_numeric(df['agent_rating'], errors='coerce')
-        
-        # Handle categorical columns: strip whitespace, title case
-        categorical_cols = ['traffic', 'weather', 'vehicle', 'area', 'category']
-        for col in categorical_cols:
-            if col in df.columns:
-                df[col] = df[col].astype(str).str.strip().str.title()
-                # Remove 'Nan' string values
-                df[col] = df[col].replace('Nan', np.nan)
-        
-        # Drop rows with missing critical values
-        df = df.dropna(subset=['delivery_time'])
-        
-        # Fill remaining missing values strategically
-        if df['agent_age'].isnull().sum() > 0:
-            df['agent_age'].fillna(df['agent_age'].median(), inplace=True)
-        if df['agent_rating'].isnull().sum() > 0:
-            df['agent_rating'].fillna(df['agent_rating'].median(), inplace=True)
-        
-        # For categorical columns, fill with mode or 'Unknown'
-        for col in categorical_cols:
-            if df[col].isnull().sum() > 0:
-                mode_val = df[col].mode()
-                if len(mode_val) > 0:
-                    df[col].fillna(mode_val[0], inplace=True)
-                else:
-                    df[col].fillna('Unknown', inplace=True)
-        
-        # ===== DERIVE NEW METRICS =====
-        
-        # 1. Late delivery flag: delivery_time > mean + 1 std deviation
-        mean_time = df['delivery_time'].mean()
-        std_time = df['delivery_time'].std()
-        threshold = mean_time + std_time
-        df['is_late'] = (df['delivery_time'] > threshold).astype(int)
-        
-        # 2. Age groups for agent age
-        df['age_group'] = pd.cut(df['agent_age'], 
-                                 bins=[0, 25, 40, 100], 
-                                 labels=['<25', '25-40', '40+'])
-        
-        # 3. Delivery time categories for better analysis
-        df['time_category'] = pd.cut(df['delivery_time'],
-                                      bins=[0, 20, 30, 40, np.inf],
-                                      labels=['Very Fast (<20)', 'Fast (20-30)', 
-                                             'Average (30-40)', 'Slow (>40)'])
-        
-        cleaned_shape = df.shape
-        
-        return df, original_shape, cleaned_shape, threshold
-        
-    except FileNotFoundError:
-        st.error("⚠️ Data file not found! Please ensure 'Last mile Delivery Data.xlsx' is in the 'data/' folder.")
-        st.stop()
-    except Exception as e:
-        st.error(f"Error loading data: {str(e)}")
+def load_data(path: str) -> pd.DataFrame:
+    df = pd.read_excel(path, engine="openpyxl")
+    # Flexible column mapping: try to normalize common header variants
+    col_map = {c.lower().strip(): c for c in df.columns}
+    rename = {}
+    for need in EXPECTED_COLS:
+        # try exact
+        if need in df.columns:
+            continue
+        # try case-insensitive approximate
+        hits = [orig for key, orig in col_map.items() if key.replace(" ", "_") == need.lower()]
+        if not hits:
+            # additional fuzzy keys
+            aliases = {
+                "delivery_time": ["delivery time","time","del_time","duration","mins","minutes"],
+                "traffic": ["traffic_level","traffic_condition","traffic status","traffic status"],
+                "weather": ["weather_condition","climate","met"],
+                "vehicle": ["vehicle_type","mode","fleet","transport"],
+                "agent_age": ["age","delivery_agent_age","courier_age"],
+                "agent_rating": ["rating","delivery_agent_rating","courier_rating","score"],
+                "area": ["region","zone","location"],
+                "category": ["product_category","item_category","sku_category"]
+            }
+            key = need.lower()
+            candidates = []
+            for alias in aliases.get(key, []):
+                for k, orig in col_map.items():
+                    if alias.replace(" ", "_") == k:
+                        candidates.append(orig)
+            hits = candidates
+        if hits:
+            rename[hits[0]] = need
+    if rename:
+        df = df.rename(columns=rename)
+
+    missing = [c for c in EXPECTED_COLS if c not in df.columns]
+    if missing:
+        st.error(f"Missing required columns: {missing}")
         st.stop()
 
-# ==================== VISUALIZATION FUNCTIONS ====================
+    # Clean types and labels
+    for c in ["Traffic","Weather","Vehicle","Area","Category"]:
+        df[c] = df[c].astype(str).str.strip().str.title()
+    for c in ["Delivery_Time","Agent_Age","Agent_Rating"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    # Drop rows without essential metrics
+    df = df.dropna(subset=["Delivery_Time"])
+    return df
 
-def create_delay_analyzer(df_filtered):
-    """
-    Compulsory Visual 1: Delay Analyzer showing avg delivery time 
-    by Weather and Traffic conditions
-    """
-    # Aggregate by weather
-    weather_agg = df_filtered.groupby('weather').agg({
-        'delivery_time': 'mean',
-        'is_late': 'mean'
-    }).reset_index()
-    weather_agg['late_pct'] = weather_agg['is_late'] * 100
-    weather_agg = weather_agg.sort_values('delivery_time', ascending=False)
-    
-    # Aggregate by traffic
-    traffic_agg = df_filtered.groupby('traffic').agg({
-        'delivery_time': 'mean',
-        'is_late': 'mean'
-    }).reset_index()
-    traffic_agg['late_pct'] = traffic_agg['is_late'] * 100
-    traffic_agg = traffic_agg.sort_values('delivery_time', ascending=False)
-    
-    # Create subplots
-    fig = make_subplots(
-        rows=1, cols=2,
-        subplot_titles=('Average Delivery Time by Weather', 
-                       'Average Delivery Time by Traffic'),
-        specs=[[{"secondary_y": True}, {"secondary_y": True}]]
-    )
-    
-    # Weather chart
-    fig.add_trace(
-        go.Bar(x=weather_agg['weather'], 
-               y=weather_agg['delivery_time'],
-               name='Avg Time',
-               marker_color='lightblue',
-               text=weather_agg['delivery_time'].round(1),
-               textposition='outside',
-               showlegend=True),
-        row=1, col=1, secondary_y=False
-    )
-    
-    fig.add_trace(
-        go.Scatter(x=weather_agg['weather'],
-                  y=weather_agg['late_pct'],
-                  name='Late %',
-                  mode='lines+markers',
-                  marker=dict(size=10, color='red'),
-                  line=dict(width=2, color='red'),
-                  showlegend=True),
-        row=1, col=1, secondary_y=True
-    )
-    
-    # Traffic chart
-    fig.add_trace(
-        go.Bar(x=traffic_agg['traffic'],
-               y=traffic_agg['delivery_time'],
-               name='Avg Time',
-               marker_color='lightgreen',
-               text=traffic_agg['delivery_time'].round(1),
-               textposition='outside',
-               showlegend=False),
-        row=1, col=2, secondary_y=False
-    )
-    
-    fig.add_trace(
-        go.Scatter(x=traffic_agg['traffic'],
-                  y=traffic_agg['late_pct'],
-                  name='Late %',
-                  mode='lines+markers',
-                  marker=dict(size=10, color='red'),
-                  line=dict(width=2, color='red'),
-                  showlegend=False),
-        row=1, col=2, secondary_y=True
-    )
-    
-    # Update axes
-    fig.update_yaxes(title_text="Avg Delivery Time (min)", row=1, col=1, secondary_y=False)
-    fig.update_yaxes(title_text="% Late Deliveries", row=1, col=1, secondary_y=True)
-    fig.update_yaxes(title_text="Avg Delivery Time (min)", row=1, col=2, secondary_y=False)
-    fig.update_yaxes(title_text="% Late Deliveries", row=1, col=2, secondary_y=True)
-    
-    fig.update_layout(height=400, showlegend=True, 
-                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    
-    return fig
+def derive_features(df: pd.DataFrame, sla_minutes: float | None, percentile: int | None) -> Tuple[pd.DataFrame, float]:
+    d = df.copy()
+    if sla_minutes is not None:
+        tau = float(sla_minutes)
+    elif percentile is not None:
+        tau = float(np.nanpercentile(d["Delivery_Time"], percentile))
+    else:
+        tau = float(np.nanmedian(d["Delivery_Time"]))
+    d["Delay_Flag"] = (d["Delivery_Time"] > tau).astype(int)
 
-def create_vehicle_comparison(df_filtered):
-    """
-    Compulsory Visual 2: Vehicle Comparison showing avg delivery time by vehicle type
-    """
-    vehicle_agg = df_filtered.groupby('vehicle').agg({
-        'delivery_time': 'mean',
-        'is_late': 'mean'
-    }).reset_index()
-    vehicle_agg['late_pct'] = vehicle_agg['is_late'] * 100
-    vehicle_agg = vehicle_agg.sort_values('delivery_time')
-    
-    fig = go.Figure()
-    
-    fig.add_trace(go.Bar(
-        x=vehicle_agg['vehicle'],
-        y=vehicle_agg['delivery_time'],
-        text=vehicle_agg['delivery_time'].round(1),
-        textposition='outside',
-        marker=dict(
-            color=vehicle_agg['delivery_time'],
-            colorscale='RdYlGn_r',
-            showscale=True,
-            colorbar=dict(title="Avg Time")
-        ),
-        hovertemplate='<b>%{x}</b><br>Avg Time: %{y:.1f} min<br>Late: ' + 
-                     vehicle_agg['late_pct'].round(1).astype(str) + '%<extra></extra>'
-    ))
-    
-    fig.update_layout(
-        title="Vehicle Performance Comparison",
-        xaxis_title="Vehicle Type",
-        yaxis_title="Average Delivery Time (minutes)",
-        height=400
-    )
-    
-    return fig
+    # Age bins
+    bins = [0, 25, 35, 45, np.inf]
+    labels = ["<25","25-34","35-44","45+"]
+    d["Age_Bin"] = pd.cut(d["Agent_Age"], bins=bins, labels=labels, include_lowest=True)
 
-def create_agent_performance_scatter(df_filtered):
-    """
-    Compulsory Visual 3: Agent Performance Scatter Plot
-    showing Agent_Rating vs Delivery_Time colored by Age Group
-    """
-    fig = px.scatter(
-        df_filtered,
-        x='agent_rating',
-        y='delivery_time',
-        color='age_group',
-        size='delivery_time',
-        hover_data=['vehicle', 'area', 'category'],
-        title='Agent Performance: Rating vs Delivery Time by Age Group',
-        labels={
-            'agent_rating': 'Agent Rating',
-            'delivery_time': 'Delivery Time (min)',
-            'age_group': 'Age Group'
-        },
-        color_discrete_sequence=px.colors.qualitative.Set2
-    )
-    
-    fig.update_layout(height=450)
-    
-    return fig
+    return d, tau
 
-def create_area_heatmap(df_filtered):
-    """
-    Compulsory Visual 4: Area Heatmap showing avg delivery time across areas
-    """
-    # Create pivot for heatmap (Area vs Category)
-    pivot = df_filtered.pivot_table(
-        values='delivery_time',
-        index='area',
-        columns='category',
-        aggfunc='mean'
-    )
-    
-    fig = go.Figure(data=go.Heatmap(
-        z=pivot.values,
-        x=pivot.columns,
-        y=pivot.index,
-        colorscale='RdYlGn_r',
-        text=np.round(pivot.values, 1),
-        texttemplate='%{text}',
-        textfont={"size": 10},
-        colorbar=dict(title="Avg Time (min)")
-    ))
-    
-    fig.update_layout(
-        title='Delivery Time Heatmap: Area × Category',
-        xaxis_title='Product Category',
-        yaxis_title='Delivery Area',
-        height=500
-    )
-    
-    return fig
+def compute_kpis(d: pd.DataFrame) -> Tuple[float, float, int]:
+    avg_time = float(d["Delivery_Time"].mean()) if len(d) else np.nan
+    delay_rate = float(d["Delay_Flag"].mean()*100) if len(d) else np.nan
+    n = int(len(d))
+    return avg_time, delay_rate, n
 
-def create_category_boxplot(df_filtered):
-    """
-    Compulsory Visual 5: Category Visualizer (Boxplot) 
-    showing delivery time distribution by category
-    """
-    fig = px.box(
-        df_filtered,
-        x='category',
-        y='delivery_time',
-        color='category',
-        title='Delivery Time Distribution by Product Category',
-        labels={
-            'category': 'Product Category',
-            'delivery_time': 'Delivery Time (min)'
-        },
-        color_discrete_sequence=px.colors.qualitative.Pastel
+def group_metrics(d: pd.DataFrame, by: str) -> pd.DataFrame:
+    g = d.groupby(by, dropna=False).agg(
+        avg_time=("Delivery_Time","mean"),
+        delay_rate=("Delay_Flag","mean"),
+        n=("Delivery_Time","size")
+    ).reset_index()
+    g["delay_rate"] = g["delay_rate"] * 100
+    # Sort with more delayed first as default
+    g = g.sort_values(["delay_rate","avg_time"], ascending=[False, False])
+    return g
+
+def warn_small_n(df: pd.DataFrame, threshold: int = 20) -> pd.DataFrame:
+    df = df.copy()
+    df["note"] = np.where(df["n"] < threshold, "Low volume", "")
+    return df
+
+# ---------- Load ----------
+DATA_PATH = "data/Last mile Delivery Data.xlsx"  # Place the Excel file here
+df_raw = load_data(DATA_PATH)
+
+# ---------- Sidebar ----------
+st.sidebar.header("Filters")
+st.sidebar.caption("Adjust thresholds and selections to update all KPIs and charts.")
+
+use_fixed_sla = st.sidebar.toggle("Use fixed SLA (minutes)", value=True)
+if use_fixed_sla:
+    sla = st.sidebar.number_input("SLA threshold (minutes)", min_value=1.0, value=40.0, step=1.0)
+    df, tau = derive_features(df_raw, sla_minutes=sla, percentile=None)
+else:
+    pct = st.sidebar.slider("Delay percentile threshold", 50, 95, 75, 1)
+    df, tau = derive_features(df_raw, sla_minutes=None, percentile=pct)
+
+multis: Dict[str, List[str]] = {}
+for c in ["Traffic","Weather","Vehicle","Area","Category"]:
+    opts = sorted([x for x in df[c].dropna().unique().tolist()])
+    default = opts
+    multis[c] = st.sidebar.multiselect(c, opts, default=default)
+
+# Sliders for numeric ranges
+rating_min = float(np.nanmin(df["Agent_Rating"])) if df["Agent_Rating"].notna().any() else 0.0
+rating_max = float(np.nanmax(df["Agent_Rating"])) if df["Agent_Rating"].notna().any() else 5.0
+age_min = int(np.nanmin(df["Agent_Age"])) if df["Agent_Age"].notna().any() else 18
+age_max = int(np.nanmax(df["Agent_Age"])) if df["Agent_Age"].notna().any() else 60
+rating_sel = st.sidebar.slider("Agent_Rating range", rating_min, rating_max, (rating_min, rating_max))
+age_sel = st.sidebar.slider("Agent_Age range", age_min, age_max, (age_min, age_max))
+
+# ---------- Apply filters ----------
+df_f = df.copy()
+for c, vals in multis.items():
+    if vals:
+        df_f = df_f[df_f[c].isin(vals)]
+df_f = df_f[df_f["Agent_Rating"].between(*rating_sel)]
+df_f = df_f[df_f["Agent_Age"].between(*age_sel)]
+
+# ---------- KPI Header ----------
+st.title("Last-Mile Delivery Analytics Dashboard")
+k1, k2, k3 = st.columns([1,1,2])
+avg_time, delay_rate, n_obs = compute_kpis(df_f)
+with k1:
+    st.metric("Average Delivery Time (min)", f"{avg_time:.1f}" if pd.notna(avg_time) else "—")
+with k2:
+    st.metric("Delay Rate (%)", f"{delay_rate:.1f}" if pd.notna(delay_rate) else "—")
+with k3:
+    st.write(f"Records: {n_obs} | Delay threshold (τ): {tau:.1f} minutes")
+
+st.divider()
+
+# ---------- Delay Analyzer ----------
+st.subheader("Delay Analyzer")
+c1, c2 = st.columns(2)
+
+def layered_bar(table: pd.DataFrame, xcol: str):
+    table = warn_small_n(table)
+    base = alt.Chart(table).encode(x=alt.X(f"{xcol}:N", sort='-y'))
+    bars = base.mark_bar(color="#4F8EF7").encode(
+        y=alt.Y("avg_time:Q", title="Avg Time (min)"),
+        tooltip=[xcol, alt.Tooltip("avg_time:Q", format=".1f"), alt.Tooltip("delay_rate:Q", format=".1f", title="Delay Rate (%)"), "n","note"]
     )
-    
-    fig.update_layout(height=450, showlegend=False)
-    
-    return fig
-
-# ==================== OPTIONAL VISUALIZATIONS ====================
-
-def create_monthly_trend(df_filtered):
-    """Optional: Monthly trend line chart"""
-    # If date column exists
-    if 'date' in df_filtered.columns or 'delivery_date' in df_filtered.columns:
-        date_col = 'date' if 'date' in df_filtered.columns else 'delivery_date'
-        df_filtered[date_col] = pd.to_datetime(df_filtered[date_col], errors='coerce')
-        monthly = df_filtered.groupby(df_filtered[date_col].dt.to_period('M')).agg({
-            'delivery_time': 'mean'
-        }).reset_index()
-        monthly[date_col] = monthly[date_col].dt.to_timestamp()
-        
-        fig = px.line(monthly, x=date_col, y='delivery_time',
-                     title='Monthly Delivery Time Trend',
-                     labels={'delivery_time': 'Avg Delivery Time (min)'})
-        fig.update_layout(height=350)
-        return fig
-    return None
-
-def create_time_distribution(df_filtered):
-    """Optional: Delivery time distribution histogram"""
-    fig = px.histogram(
-        df_filtered,
-        x='delivery_time',
-        nbins=30,
-        title='Distribution of Delivery Times',
-        labels={'delivery_time': 'Delivery Time (min)', 'count': 'Frequency'},
-        color_discrete_sequence=['steelblue']
+    points = base.mark_point(size=90, filled=True, color="#E45756").encode(
+        y=alt.Y("delay_rate:Q", axis=alt.Axis(title="Delay Rate (%)")),
+        tooltip=[xcol, alt.Tooltip("delay_rate:Q", format=".1f"), "n","note"]
     )
-    fig.update_layout(height=350)
-    return fig
+    return alt.layer(bars, points).resolve_scale(y='independent').properties(height=320)
 
-def create_late_delivery_analysis(df_filtered):
-    """Optional: % of late deliveries by traffic and weather"""
-    late_by_traffic = df_filtered.groupby('traffic')['is_late'].mean() * 100
-    late_by_weather = df_filtered.groupby('weather')['is_late'].mean() * 100
-    
-    fig = make_subplots(rows=1, cols=2, 
-                       subplot_titles=('Late Deliveries by Traffic', 
-                                     'Late Deliveries by Weather'))
-    
-    fig.add_trace(go.Bar(x=late_by_traffic.index, y=late_by_traffic.values,
-                        marker_color='coral', showlegend=False),
-                 row=1, col=1)
-    fig.add_trace(go.Bar(x=late_by_weather.index, y=late_by_weather.values,
-                        marker_color='lightseagreen', showlegend=False),
-                 row=1, col=2)
-    
-    fig.update_yaxes(title_text="% Late Deliveries", row=1, col=1)
-    fig.update_yaxes(title_text="% Late Deliveries", row=1, col=2)
-    fig.update_layout(height=350, title_text="Late Delivery Analysis")
-    
-    return fig
+with c1:
+    g_tr = group_metrics(df_f, "Traffic")
+    st.altair_chart(layered_bar(g_tr, "Traffic"), use_container_width=True)
+with c2:
+    g_we = group_metrics(df_f, "Weather")
+    st.altair_chart(layered_bar(g_we, "Weather"), use_container_width=True)
 
-def create_agent_count_by_area(df_filtered):
-    """Optional: Agent count per area"""
-    agent_count = df_filtered.groupby('area').size().reset_index(name='count')
-    agent_count = agent_count.sort_values('count', ascending=False)
-    
-    fig = px.bar(agent_count, x='area', y='count',
-                title='Number of Deliveries by Area',
-                labels={'area': 'Area', 'count': 'Number of Deliveries'},
-                color='count', color_continuous_scale='Blues')
-    fig.update_layout(height=350)
-    return fig
+st.caption("Identify conditions driving delays to adjust buffers, routing, and contingency planning.")
 
-# ==================== MAIN APP ====================
+st.divider()
 
-def main():
-    # Header
-    st.title("🚚 Last-Mile Delivery Analytics Dashboard")
-    st.markdown("**LogiSight Analytics Pvt. Ltd.** | FA-2 Project by Jwal Patel")
-    st.markdown("---")
-    
-    # Load data
-    with st.spinner("Loading and cleaning data..."):
-        df, original_shape, cleaned_shape, late_threshold = load_and_clean_data(
-            'data/Last mile Delivery Data.xlsx'
-        )
-    
-    # ==================== SIDEBAR FILTERS ====================
-    st.sidebar.header("📊 Dashboard Filters")
-    st.sidebar.markdown("Use these filters to explore delivery insights")
-    
-    # Weather filter
-    weather_options = ['All'] + sorted(df['weather'].unique().tolist())
-    selected_weather = st.sidebar.multiselect(
-        "Weather Condition",
-        options=weather_options[1:],
-        default=weather_options[1:]
-    )
-    
-    # Traffic filter
-    traffic_options = ['All'] + sorted(df['traffic'].unique().tolist())
-    selected_traffic = st.sidebar.multiselect(
-        "Traffic Level",
-        options=traffic_options[1:],
-        default=traffic_options[1:]
-    )
-    
-    # Vehicle filter
-    vehicle_options = ['All'] + sorted(df['vehicle'].unique().tolist())
-    selected_vehicle = st.sidebar.multiselect(
-        "Vehicle Type",
-        options=vehicle_options[1:],
-        default=vehicle_options[1:]
-    )
-    
-    # Area filter
-    area_options = ['All'] + sorted(df['area'].unique().tolist())
-    selected_area = st.sidebar.multiselect(
-        "Delivery Area",
-        options=area_options[1:],
-        default=area_options[1:]
-    )
-    
-    # Category filter
-    category_options = ['All'] + sorted(df['category'].unique().tolist())
-    selected_category = st.sidebar.multiselect(
-        "Product Category",
-        options=category_options[1:],
-        default=category_options[1:]
-    )
-    
-    st.sidebar.markdown("---")
-    
-    # Apply filters
-    df_filtered = df.copy()
-    
-    if selected_weather:
-        df_filtered = df_filtered[df_filtered['weather'].isin(selected_weather)]
-    if selected_traffic:
-        df_filtered = df_filtered[df_filtered['traffic'].isin(selected_traffic)]
-    if selected_vehicle:
-        df_filtered = df_filtered[df_filtered['vehicle'].isin(selected_vehicle)]
-    if selected_area:
-        df_filtered = df_filtered[df_filtered['area'].isin(selected_area)]
-    if selected_category:
-        df_filtered = df_filtered[df_filtered['category'].isin(selected_category)]
-    
-    # ==================== KEY METRICS ====================
-    st.header("📈 Key Performance Indicators")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        avg_time = df_filtered['delivery_time'].mean()
-        st.metric(
-            "Average Delivery Time",
-            f"{avg_time:.1f} min",
-            delta=f"{avg_time - df['delivery_time'].mean():.1f} vs overall"
-        )
-    
-    with col2:
-        late_pct = (df_filtered['is_late'].mean() * 100)
-        st.metric(
-            "Late Deliveries",
-            f"{late_pct:.1f}%",
-            delta=f"{late_pct - (df['is_late'].mean() * 100):.1f}% vs overall",
-            delta_color="inverse"
-        )
-    
-    with col3:
-        total_deliveries = len(df_filtered)
-        st.metric(
-            "Total Deliveries",
-            f"{total_deliveries:,}",
-            delta=f"{total_deliveries - len(df):,} vs overall"
-        )
-    
-    with col4:
-        avg_rating = df_filtered['agent_rating'].mean()
-        st.metric(
-            "Avg Agent Rating",
-            f"{avg_rating:.2f}",
-            delta=f"{avg_rating - df['agent_rating'].mean():.2f} vs overall"
-        )
-    
-    st.info(f"📌 Late delivery threshold: {late_threshold:.1f} minutes (mean + 1 std dev)")
-    st.markdown("---")
-    
-    # ==================== COMPULSORY VISUALIZATIONS ====================
-    
-    st.header("🎯 Compulsory Analysis")
-    
-    # 1. Delay Analyzer
-    st.subheader("1️⃣ Delay Analyzer: Impact of Weather & Traffic")
-    st.plotly_chart(create_delay_analyzer(df_filtered), use_container_width=True)
-    st.caption("📊 This chart helps managers identify which weather and traffic conditions lead to longer delivery times and higher delay rates.")
-    
-    st.markdown("---")
-    
-    # 2. Vehicle Comparison
-    st.subheader("2️⃣ Vehicle Performance Comparison")
-    st.plotly_chart(create_vehicle_comparison(df_filtered), use_container_width=True)
-    st.caption("🚗 Compare vehicle types to identify the fastest and most reliable fleet for efficient delivery planning.")
-    
-    st.markdown("---")
-    
-    # 3. Agent Performance Scatter
-    st.subheader("3️⃣ Agent Performance Analysis")
-    st.plotly_chart(create_agent_performance_scatter(df_filtered), use_container_width=True)
-    st.caption("👤 Analyze the relationship between agent ratings, age groups, and delivery performance for workforce optimization.")
-    
-    st.markdown("---")
-    
-    # 4. Area Heatmap
-    st.subheader("4️⃣ Geographic Performance Heatmap")
-    st.plotly_chart(create_area_heatmap(df_filtered), use_container_width=True)
-    st.caption("🗺️ Identify geographic hotspots where delays are common, enabling targeted operational improvements.")
-    
-    st.markdown("---")
-    
-    # 5. Category Boxplot
-    st.subheader("5️⃣ Product Category Distribution")
-    st.plotly_chart(create_category_boxplot(df_filtered), use_container_width=True)
-    st.caption("📦 Understand which product categories consistently face longer delivery times for better resource allocation.")
-    
-    st.markdown("---")
-    
-    # ==================== OPTIONAL VISUALIZATIONS ====================
-    
-    with st.expander("🔍 Additional Insights (Optional Visuals)", expanded=False):
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.plotly_chart(create_time_distribution(df_filtered), use_container_width=True)
-        
-        with col2:
-            st.plotly_chart(create_late_delivery_analysis(df_filtered), use_container_width=True)
-        
-        st.plotly_chart(create_agent_count_by_area(df_filtered), use_container_width=True)
-    
-    # ==================== DATA QUALITY INFO ====================
-    
-    with st.expander("ℹ️ Data Quality Report"):
-        st.write("**Original Dataset:**", f"{original_shape[0]} rows × {original_shape[1]} columns")
-        st.write("**After Cleaning:**", f"{cleaned_shape[0]} rows × {cleaned_shape[1]} columns")
-        st.write("**Rows Removed:**", original_shape[0] - cleaned_shape[0])
-        
-        st.write("\n**Summary Statistics:**")
-        st.dataframe(df_filtered.describe())
-        
-        st.write("\n**Categorical Value Counts:**")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("Weather:", df_filtered['weather'].value_counts().to_dict())
-            st.write("Traffic:", df_filtered['traffic'].value_counts().to_dict())
-            st.write("Vehicle:", df_filtered['vehicle'].value_counts().to_dict())
-        with col2:
-            st.write("Area:", df_filtered['area'].value_counts().to_dict())
-            st.write("Category:", df_filtered['category'].value_counts().to_dict())
-    
-    # Footer
-    st.markdown("---")
-    st.markdown("""
-    <div style='text-align: center; color: gray; padding: 20px;'>
-        <p><strong>Last-Mile Delivery Analytics Dashboard</strong></p>
-        <p>FA-2 Project | Mathematics for AI-II | CRS: Artificial Intelligence</p>
-        <p>Developed by: Jwal Patel | LogiSight Analytics Pvt. Ltd.</p>
-    </div>
-    """, unsafe_allow_html=True)
+# ---------- Vehicle Comparison ----------
+st.subheader("Vehicle Comparison")
+# Altair boxplot
+box = alt.Chart(df_f).mark_boxplot(outliers={'color': '#E45756'}).encode(
+    x=alt.X("Vehicle:N", title=None),
+    y=alt.Y("Delivery_Time:Q", title="Delivery Time (min)"),
+    color=alt.Color("Vehicle:N", legend=None),
+    tooltip=[alt.Tooltip("Vehicle:N", title="Vehicle")]
+).properties(height=330)
+st.altair_chart(box, use_container_width=True)
+st.caption("Assess speed and consistency to optimize fleet usage.")
 
-if __name__ == "__main__":
-    main()
+st.divider()
+
+# ---------- Agent Insights ----------
+st.subheader("Agent Insights")
+# Aggregate by rating (optionally bin rating if very granular)
+# Here we show per-delivery scatter colored by Age_Bin
+scatter = alt.Chart(df_f).mark_circle(size=64, opacity=0.7).encode(
+    x=alt.X("Agent_Rating:Q", title="Agent Rating"),
+    y=alt.Y("Delivery_Time:Q", title="Delivery Time (min)"),
+    color=alt.Color("Age_Bin:N", title="Age Bin"),
+    tooltip=[alt.Tooltip("Agent_Rating:Q", format=".1f"), "Agent_Age","Delivery_Time","Vehicle","Area","Category"]
+).properties(height=340)
+# Add trendline via transform_regression
+trend = scatter.transform_regression("Agent_Rating","Delivery_Time").mark_line(color="#555", strokeDash=[6,3])
+st.altair_chart(scatter + trend, use_container_width=True)
+st.caption("Target training and assignments based on performance patterns.")
+
+st.divider()
+
+# ---------- Areas & Categories ----------
+st.subheader("Areas & Categories")
+g_area = group_metrics(df_f, "Area").sort_values("delay_rate", ascending=False)
+bar_area = alt.Chart(g_area).mark_bar(color="#F2A541").encode(
+    x=alt.X("Area:N", sort="-y"),
+    y=alt.Y("delay_rate:Q", title="Delay Rate (%)"),
+    tooltip=["Area", alt.Tooltip("delay_rate:Q", format=".1f"), "n"]
+).properties(height=330)
+st.altair_chart(bar_area, use_container_width=True)
+
+# Heatmap Area x Category of delay rate
+pivot = df_f.pivot_table(index="Area", columns="Category", values="Delay_Flag", aggfunc="mean")
+heat_df = (pivot*100).reset_index().melt(id_vars="Area", var_name="Category", value_name="delay_rate").fillna(0)
+heat = alt.Chart(heat_df).mark_rect().encode(
+    x=alt.X("Category:N", title="Category"),
+    y=alt.Y("Area:N", title="Area"),
+    color=alt.Color("delay_rate:Q", title="Delay Rate (%)", scale=alt.Scale(scheme="redyellowblue")),
+    tooltip=["Area","Category", alt.Tooltip("delay_rate:Q", format=".1f")]
+).properties(height=380)
+st.altair_chart(heat, use_container_width=True)
+st.caption("Pinpoint hotspots where location and product type combine to create bottlenecks.")
+
+st.divider()
+
+# ---------- Export ----------
+st.subheader("Export Filtered Summaries")
+galls = {
+    "by_traffic": g_tr,
+    "by_weather": g_we,
+    "by_vehicle": group_metrics(df_f, "Vehicle"),
+    "by_area": g_area,
+    "by_category": group_metrics(df_f, "Category")
+}
+all_df = pd.concat({k: v for k, v in galls.items()}, names=["group"]).reset_index()
+csv_bytes = all_df.to_csv(index=False).encode("utf-8")
+st.download_button("Download CSV snapshot", data=csv_bytes, file_name="filtered_summaries.csv", mime="text/csv")
+
+# ---------- Footer ----------
+st.write("---")
+st.caption("Data logic: Load → Clean/Standardize → Derive Delay_Flag & Age_Bin → Aggregate → Apply Filters → Update KPIs & Visuals → Export.")
