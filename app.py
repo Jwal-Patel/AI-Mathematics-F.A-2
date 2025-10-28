@@ -291,6 +291,7 @@ def create_agent_performance_scatter(df_filtered):
     """
     Compulsory Visual 3: Agent Performance Scatter Plot
     showing Agent_Rating vs Delivery_Time colored by Age Group
+    WITH TRENDLINE
     """
     fig = px.scatter(
         df_filtered,
@@ -303,9 +304,11 @@ def create_agent_performance_scatter(df_filtered):
         labels={
             'agent_rating': 'Agent Rating',
             'delivery_time': 'Delivery Time (min)',
-            'age_group': 'Age Group'
+            'age_group': 'Age Bin'
         },
-        color_discrete_sequence=px.colors.qualitative.Set2
+        color_discrete_sequence=px.colors.qualitative.Set2,
+        trendline='ols',  # Add trendline
+        trendline_scope='overall'
     )
     
     fig.update_layout(height=450)
@@ -566,8 +569,8 @@ def main():
     
     st.markdown("---")
     
-    # 3. Agent Performance Scatter
-    st.subheader("3️⃣ Agent Performance Analysis")
+    # 3. Agent Performance Scatter (WITH TRENDLINE)
+    st.subheader("3️⃣ Agent Insights")
     st.plotly_chart(create_agent_performance_scatter(df_filtered), use_container_width=True)
     st.caption("👤 Analyze the relationship between agent ratings, age groups, and delivery performance for workforce optimization.")
     
@@ -601,6 +604,53 @@ def main():
         
         st.plotly_chart(create_agent_count_by_area(df_filtered), use_container_width=True)
     
+    # ==================== EXPORT FILTERED SUMMARIES ====================
+    
+    st.markdown("---")
+    st.subheader("📤 Export Filtered Summaries")
+    
+    # Prepare aggregated data for export
+    export_data = {
+        'by_traffic': df_filtered.groupby('traffic').agg({
+            'delivery_time': 'mean',
+            'is_late': lambda x: (x.mean() * 100)
+        }).reset_index().rename(columns={'delivery_time': 'avg_time', 'is_late': 'late_pct'}),
+        
+        'by_weather': df_filtered.groupby('weather').agg({
+            'delivery_time': 'mean',
+            'is_late': lambda x: (x.mean() * 100)
+        }).reset_index().rename(columns={'delivery_time': 'avg_time', 'is_late': 'late_pct'}),
+        
+        'by_vehicle': df_filtered.groupby('vehicle').agg({
+            'delivery_time': 'mean',
+            'is_late': lambda x: (x.mean() * 100)
+        }).reset_index().rename(columns={'delivery_time': 'avg_time', 'is_late': 'late_pct'}),
+        
+        'by_area': df_filtered.groupby('area').agg({
+            'delivery_time': 'mean',
+            'is_late': lambda x: (x.mean() * 100)
+        }).reset_index().rename(columns={'delivery_time': 'avg_time', 'is_late': 'late_pct'}),
+        
+        'by_category': df_filtered.groupby('category').agg({
+            'delivery_time': 'mean',
+            'is_late': lambda x: (x.mean() * 100)
+        }).reset_index().rename(columns={'delivery_time': 'avg_time', 'is_late': 'late_pct'})
+    }
+    
+    # Combine all aggregates
+    all_df = pd.concat(export_data, names=['group']).reset_index()
+    
+    # Download button
+    csv_bytes = all_df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="📥 Download CSV snapshot",
+        data=csv_bytes,
+        file_name="filtered_delivery_summaries.csv",
+        mime="text/csv"
+    )
+    
+    st.caption("💡 Download aggregated metrics for all filtered dimensions (Traffic, Weather, Vehicle, Area, Category).")
+    
     # ==================== DATA QUALITY INFO ====================
     
     with st.expander("ℹ️ Data Quality Report"):
@@ -623,6 +673,7 @@ def main():
     
     # Footer
     st.markdown("---")
+    st.caption("**Data logic:** Load → Clean/Standardize → Derive Delay_Flag & Age_Bin → Aggregate → Apply Filters → Update KPIs & Visuals → Export.")
     st.markdown("""
     <div style='text-align: center; color: gray; padding: 20px;'>
         <p><strong>Last-Mile Delivery Analytics Dashboard</strong></p>
