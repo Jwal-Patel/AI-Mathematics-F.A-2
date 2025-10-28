@@ -30,6 +30,18 @@ st.markdown("""
         padding: 15px;
         border-radius: 10px;
     }
+    .stMetric label {
+        color: #2c3e50 !important;
+        font-weight: 600 !important;
+    }
+    .stMetric [data-testid="stMetricValue"] {
+        color: #1f77b4 !important;
+        font-size: 24px !important;
+        font-weight: 700 !important;
+    }
+    .stMetric [data-testid="stMetricDelta"] {
+        color: #555555 !important;
+    }
     h1 {
         color: #1f77b4;
         padding-bottom: 20px;
